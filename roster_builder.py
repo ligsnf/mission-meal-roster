@@ -3,6 +3,7 @@ import argparse
 from collections import defaultdict, Counter
 from typing import List, Dict, Tuple, Optional, Set
 import random
+import math
 
 # Configuration
 COOKING_DAYS = ["Mon", "Tue", "Thu", "Sun"]
@@ -63,7 +64,7 @@ class RosterBuilder:
         self.persons = [p["name"] for p in people]
         self.name_to_gender = {p["name"]: p["gender"] for p in people}
         
-        # Initial capacities (we'll reset these for backtracking)
+        # Initial capacities
         self.initial_caps = {
             p["name"]: {
                 "H": p["H"],
@@ -88,6 +89,9 @@ class RosterBuilder:
         # Stats
         self.backtrack_count = 0
         self.assignment_count = 0
+        
+        # Night index for scoring
+        self.night_index = {NIGHTS[i]: i for i in range(len(NIGHTS))}
         
         # Debug
         self.verbose = False
@@ -207,19 +211,7 @@ class RosterBuilder:
         night_idx = num_assigned // len(ROLES_PER_NIGHT)
         role_idx = num_assigned % len(ROLES_PER_NIGHT)
         
-        # Determine assignment order: gender-restricted nights first
-        ordered_nights = []
-        for wd in NIGHTS:
-            if wd in GENDER_ONLY:
-                ordered_nights.insert(0, wd)  # Prioritize
-            else:
-                ordered_nights.append(wd)
-        
-        # But actually, let's keep natural order for simplicity
-        # The key is backtracking will fix mistakes
-        ordered_nights = NIGHTS
-        
-        week_day = ordered_nights[night_idx]
+        week_day = NIGHTS[night_idx]
         role = ROLES_PER_NIGHT[role_idx]
         
         # Get candidates for this slot
@@ -250,7 +242,7 @@ class RosterBuilder:
     def build(self) -> Tuple[Optional[Dict], str]:
         """Main build function with backtracking"""
         print("\n" + "="*60)
-        print("STARTING ROSTER BUILD (with backtracking)")
+        print("PHASE 1: Finding valid roster (backtracking)")
         print("="*60 + "\n")
         
         success = self.solve_with_backtracking()
@@ -258,7 +250,7 @@ class RosterBuilder:
         if not success:
             return None, "No valid roster found (exhausted all possibilities)"
         
-        print(f"\n✓ Solution found!")
+        print(f"✓ Valid solution found!")
         print(f"  Assignments: {self.assignment_count}")
         print(f"  Backtracks: {self.backtrack_count}")
         
@@ -276,9 +268,207 @@ class RosterBuilder:
             return None, "Not all capacities were used"
         
         print("✓ All capacities used correctly")
-        print("="*60 + "\n")
         
         return self.roster, "ok"
+
+
+class RosterOptimizer:
+    def __init__(self, roster: Dict, people: List[Dict]):
+        self.roster = roster
+        self.people = people
+        self.persons = [p["name"] for p in people]
+        self.name_to_gender = {p["name"]: p["gender"] for p in people}
+        self.name_to_can_head = {p["name"]: p["can_head"] for p in people}
+        self.night_index = {NIGHTS[i]: i for i in range(len(NIGHTS))}
+        
+    def get_cap_key(self, role: str) -> str:
+        if role == "H":
+            return "H"
+        elif role.startswith("S"):
+            return "S"
+        else:
+            return "C"
+    
+    def calculate_score(self, roster: Dict) -> float:
+        """
+        Calculate distribution score. Lower = better.
+        
+        Penalizes:
+        - Uneven distribution across weeks
+        - Back-to-back same role type
+        - Clustering within short time periods
+        """
+        score = 0.0
+        
+        # 1. Week distribution variance (weight: 10)
+        person_weeks = defaultdict(lambda: [0, 0, 0, 0])
+        for (week, day), roles in roster.items():
+            for role, person in roles.items():
+                person_weeks[person][week - 1] += 1
+        
+        for person, counts in person_weeks.items():
+            mean = sum(counts) / 4
+            variance = sum((c - mean) ** 2 for c in counts)
+            score += variance * 10
+        
+        # 2. Back-to-back same role type penalty (weight: 5)
+        person_nights = defaultdict(list)
+        for night, roles in sorted(roster.items(), key=lambda x: self.night_index[x[0]]):
+            for role, person in roles.items():
+                person_nights[person].append((self.night_index[night], self.get_cap_key(role)))
+        
+        for person, assignments in person_nights.items():
+            assignments.sort()  # Sort by night index
+            for i in range(len(assignments) - 1):
+                idx1, role1 = assignments[i]
+                idx2, role2 = assignments[i + 1]
+                # Check if consecutive cooking nights with same role type
+                if idx2 == idx1 + 1 and role1 == role2:
+                    score += 5
+        
+        # 3. Clustering penalty - prefer spread throughout the month (weight: 2)
+        for person in self.persons:
+            night_indices = []
+            for night, roles in roster.items():
+                if person in roles.values():
+                    night_indices.append(self.night_index[night])
+            
+            night_indices.sort()
+            # Calculate gaps between assignments
+            if len(night_indices) > 1:
+                gaps = [night_indices[i+1] - night_indices[i] for i in range(len(night_indices)-1)]
+                gap_variance = sum((g - sum(gaps)/len(gaps))**2 for g in gaps) / len(gaps)
+                score += gap_variance * 2
+        
+        return score
+    
+    def can_swap(self, roster: Dict, night1: Tuple, role1: str, night2: Tuple, role2: str) -> bool:
+        """Check if two assignments can be swapped"""
+        person1 = roster[night1][role1]
+        person2 = roster[night2][role2]
+        
+        # Can't swap with yourself
+        if person1 == person2:
+            return False
+        
+        # Check if person1 can do role2 on night2
+        if role2 == "H" and not self.name_to_can_head[person1]:
+            return False
+        
+        gender_rule2 = GENDER_ONLY.get(night2)
+        if gender_rule2 and self.name_to_gender[person1] != gender_rule2:
+            return False
+        
+        # Same role type check
+        if self.get_cap_key(role1) != self.get_cap_key(role2):
+            return False
+        
+        # Check if person2 can do role1 on night1
+        if role1 == "H" and not self.name_to_can_head[person2]:
+            return False
+        
+        gender_rule1 = GENDER_ONLY.get(night1)
+        if gender_rule1 and self.name_to_gender[person2] != gender_rule1:
+            return False
+        
+        # Check neither person is already on the other night
+        if person1 in roster[night2].values():
+            return False
+        if person2 in roster[night1].values():
+            return False
+        
+        return True
+    
+    def perform_swap(self, night1: Tuple, role1: str, night2: Tuple, role2: str, roster: Dict):
+        """Perform a swap in the given roster"""
+        person1 = roster[night1][role1]
+        person2 = roster[night2][role2]
+        
+        roster[night1][role1] = person2
+        roster[night2][role2] = person1
+    
+    def optimize(self, iterations: int = 5000, initial_temp: float = 10.0, 
+                 cooling_rate: float = 0.95) -> Dict:
+        """Optimize roster using simulated annealing"""
+        print("\n" + "="*60)
+        print("PHASE 2: Optimizing distribution (simulated annealing)")
+        print("="*60 + "\n")
+        
+        import copy
+        
+        current_roster = copy.deepcopy(self.roster)
+        current_score = self.calculate_score(current_roster)
+        best_roster = copy.deepcopy(current_roster)
+        best_score = current_score
+        
+        temperature = initial_temp
+        accepts = 0
+        improves = 0
+        
+        # Get all possible swap pairs
+        all_assignments = []
+        for night, roles in self.roster.items():
+            for role in roles:
+                all_assignments.append((night, role))
+        
+        print(f"Initial score: {current_score:.2f}")
+        print(f"Temperature: {initial_temp} → 0 (cooling rate: {cooling_rate})")
+        print(f"Iterations: {iterations}\n")
+        
+        for i in range(iterations):
+            # Pick two random assignments
+            (night1, role1), (night2, role2) = random.sample(all_assignments, 2)
+            
+            # Check if swap is valid
+            if not self.can_swap(current_roster, night1, role1, night2, role2):
+                continue
+            
+            # Make swap
+            test_roster = copy.deepcopy(current_roster)
+            self.perform_swap(night1, role1, night2, role2, test_roster)
+            
+            # Calculate new score
+            new_score = self.calculate_score(test_roster)
+            delta = new_score - current_score
+            
+            # Decide whether to accept
+            accept = False
+            if delta < 0:
+                # Improvement - always accept
+                accept = True
+                improves += 1
+            elif temperature > 0:
+                # Worse solution - accept with probability
+                probability = math.exp(-delta / temperature)
+                if random.random() < probability:
+                    accept = True
+            
+            if accept:
+                current_roster = test_roster
+                current_score = new_score
+                accepts += 1
+                
+                # Track best
+                if current_score < best_score:
+                    best_roster = copy.deepcopy(current_roster)
+                    best_score = current_score
+            
+            # Cool down
+            temperature *= cooling_rate
+            
+            # Progress update
+            if (i + 1) % 1000 == 0:
+                print(f"  Iteration {i+1:5d}: score={current_score:.2f}, best={best_score:.2f}, "
+                      f"temp={temperature:.3f}, accepts={accepts}, improves={improves}")
+        
+        print(f"\n✓ Optimization complete!")
+        print(f"  Initial score: {self.calculate_score(self.roster):.2f}")
+        print(f"  Final score:   {best_score:.2f}")
+        print(f"  Improvement:   {((self.calculate_score(self.roster) - best_score) / self.calculate_score(self.roster) * 100):.1f}%")
+        print(f"  Swaps accepted: {accepts}/{iterations} ({accepts/iterations*100:.1f}%)")
+        print(f"  Improvements: {improves}")
+        
+        return best_roster
 
 
 def summarize(roster: Dict[Tuple[int, str], Dict[str, str]]) -> Dict[str, Counter]:
@@ -352,11 +542,44 @@ def print_summary(summary: Dict[str, Counter], people: List[Dict]):
         print("\n✓ All assignments match desired counts!")
 
 
+def print_distribution_analysis(roster: Dict):
+    """Print week-by-week distribution for each person"""
+    print("\n" + "="*60)
+    print("DISTRIBUTION ANALYSIS")
+    print("="*60 + "\n")
+    
+    person_weeks = defaultdict(lambda: [0, 0, 0, 0])
+    for (week, day), roles in roster.items():
+        for role, person in roles.items():
+            person_weeks[person][week - 1] += 1
+    
+    print(f"{'Name':<6} {'W1':<4} {'W2':<4} {'W3':<4} {'W4':<4} {'Variance'}")
+    print("-" * 60)
+    
+    for person in sorted(person_weeks.keys()):
+        counts = person_weeks[person]
+        mean = sum(counts) / 4
+        variance = sum((c - mean) ** 2 for c in counts) / 4
+        
+        print(f"{person:<6} {counts[0]:<4} {counts[1]:<4} {counts[2]:<4} {counts[3]:<4} {variance:.2f}")
+    
+    avg_variance = sum(
+        sum((c - sum(counts)/4) ** 2 for c in counts) / 4
+        for counts in person_weeks.values()
+    ) / len(person_weeks)
+    
+    print(f"\nAverage variance: {avg_variance:.2f} (lower = more even distribution)")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Build meal roster with backtracking.")
+    parser = argparse.ArgumentParser(description="Build and optimize meal roster.")
     parser.add_argument("--csv", required=True, help="Path to CSV")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for candidate ordering")
-    parser.add_argument("--verbose", action="store_true", help="Enable detailed logging")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--no-optimize", action="store_true", help="Skip optimization phase")
+    parser.add_argument("--iterations", type=int, default=5000, help="Optimization iterations")
+    parser.add_argument("--temp", type=float, default=10.0, help="Initial temperature")
+    parser.add_argument("--cooling", type=float, default=0.95, help="Cooling rate")
+    parser.add_argument("--verbose", action="store_true", help="Detailed logging")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -367,6 +590,7 @@ def main():
         print("INPUT VALIDATION ERROR:", err)
         return
 
+    # Phase 1: Find valid roster
     builder = RosterBuilder(people)
     builder.verbose = args.verbose
     roster, status = builder.build()
@@ -374,10 +598,20 @@ def main():
     if roster is None:
         print(f"\n❌ BUILD FAILED: {status}")
         return
+    
+    # Phase 2: Optimize distribution
+    if not args.no_optimize:
+        optimizer = RosterOptimizer(roster, people)
+        roster = optimizer.optimize(
+            iterations=args.iterations,
+            initial_temp=args.temp,
+            cooling_rate=args.cooling
+        )
 
     print_roster(roster)
     summary = summarize(roster)
     print_summary(summary, people)
+    print_distribution_analysis(roster)
 
 
 if __name__ == "__main__":
