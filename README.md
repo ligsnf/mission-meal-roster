@@ -1,10 +1,10 @@
 # Mission Meal Roster Generator
 
-Automated roster builder for coordinating team meals during a mission trip to Nagoya, Japan.
+Automated roster generator for mission trip meal coordination - fair distribution across head chef, sous chef, and cleanup roles
 
 ## Overview
 
-Generates a balanced meal roster for 12 team members across 4 weeks (16 cooking nights total).
+Generates a balanced meal roster for 12 team members across 4 weeks (16 cooking nights total) using constraint-based backtracking and simulated annealing optimization.
 
 **Roles per night:**
 - 1× Head Chef
@@ -15,19 +15,46 @@ Generates a balanced meal roster for 12 team members across 4 weeks (16 cooking 
 
 ## Features
 
-- Fair distribution across roles and people based on desired counts
+- Constraint-based solver with backtracking
+- Simulated annealing optimization for even distribution
 - Gender-restricted nights (Week 2: Mon girls-only, Tue boys-only)
 - Head chef capability constraints
-- Avoids back-to-back identical role assignments
-- Constraint-based algorithm with phased assignment
+- Minimizes back-to-back same role assignments
+- Balanced distribution across weeks
+- CSV export for easy sharing
 
 ## Usage
 
+Basic usage:
 ```bash
-python roster_builder.py --csv desired_counts.csv --seed 42
+python roster_builder.py --csv desired_counts.csv
 ```
 
-Try different `--seed` values if assignment fails.
+Export to CSV:
+```bash
+python roster_builder.py --csv desired_counts.csv --export roster_output.csv
+```
+
+Custom optimization parameters:
+```bash
+python roster_builder.py --csv desired_counts.csv --iterations 10000 --temp 15.0
+```
+
+Skip optimization (faster, less balanced):
+```bash
+python roster_builder.py --csv desired_counts.csv --no-optimize
+```
+
+## Options
+
+- `--csv`: Path to input CSV (required)
+- `--seed`: Random seed for reproducibility (default: 42)
+- `--export`: Export roster to CSV file
+- `--no-optimize`: Skip simulated annealing phase
+- `--iterations`: Optimization iterations (default: 5000)
+- `--temp`: Initial temperature for annealing (default: 10.0)
+- `--cooling`: Cooling rate (default: 0.95)
+- `--verbose`: Show detailed logging
 
 ## CSV Format
 
@@ -47,6 +74,11 @@ ET,0,4,4,0,M
 - `gender`: M or F (for gender-restricted nights)
 
 **Totals must equal:** 16 head, 32 sous, 48 clean
+
+## How It Works
+
+1. **Phase 1 - Backtracking Solver**: Finds a valid roster satisfying all hard constraints
+2. **Phase 2 - Simulated Annealing**: Optimizes distribution across weeks and minimizes clustering
 
 ## Requirements
 
