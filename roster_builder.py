@@ -571,6 +571,42 @@ def print_distribution_analysis(roster: Dict):
     print(f"\nAverage variance: {avg_variance:.2f} (lower = more even distribution)")
 
 
+def export_to_csv(roster: Dict[Tuple[int, str], Dict[str, str]], output_path: str):
+    """Export roster to CSV in weekly table format"""
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        
+        for week in WEEKS:
+            # Week header
+            writer.writerow([f"Week {week}"])
+            
+            # Column headers
+            writer.writerow(["Role", "Monday", "Tuesday", "Thursday", "Sunday"])
+            
+            # Role rows
+            roles_display = {
+                "H": "Head Chef",
+                "S1": "Sous Chef 1",
+                "S2": "Sous Chef 2",
+                "C1": "Clean up 1",
+                "C2": "Clean up 2",
+                "C3": "Clean up 3"
+            }
+            
+            for role_key, role_name in roles_display.items():
+                row = [role_name]
+                for day in COOKING_DAYS:
+                    night = (week, day)
+                    person = roster.get(night, {}).get(role_key, "")
+                    row.append(person)
+                writer.writerow(row)
+            
+            # Empty row between weeks
+            writer.writerow([])
+    
+    print(f"\n✓ Roster exported to: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build and optimize meal roster.")
     parser.add_argument("--csv", required=True, help="Path to CSV")
@@ -580,6 +616,7 @@ def main():
     parser.add_argument("--temp", type=float, default=10.0, help="Initial temperature")
     parser.add_argument("--cooling", type=float, default=0.95, help="Cooling rate")
     parser.add_argument("--verbose", action="store_true", help="Detailed logging")
+    parser.add_argument("--export", type=str, help="Export roster to CSV file")  # NEW
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -612,6 +649,10 @@ def main():
     summary = summarize(roster)
     print_summary(summary, people)
     print_distribution_analysis(roster)
+    
+    # Export if requested
+    if args.export:
+        export_to_csv(roster, args.export)
 
 
 if __name__ == "__main__":
