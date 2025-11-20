@@ -63,8 +63,8 @@ class RosterBuilder:
         self.persons = [p["name"] for p in people]
         self.name_to_gender = {p["name"]: p["gender"] for p in people}
         
-        # Initialize capacities
-        self.caps = {
+        # Initial capacities (we'll reset these for backtracking)
+        self.initial_caps = {
             p["name"]: {
                 "H": p["H"],
                 "S": p["S"],
@@ -74,30 +74,41 @@ class RosterBuilder:
             for p in people
         }
         
+        # Working capacities
+        self.caps = {}
+        self.reset_caps()
+        
         # Roster structure
         self.roster: Dict[Tuple[int, str], Dict[str, str]] = {}
         
-        # Tracking for back-to-back avoidance
-        self.night_index = {NIGHTS[i]: i for i in range(len(NIGHTS))}
-        self.last_role_for_person: Dict[str, Optional[Tuple[int, str]]] = {p: None for p in self.persons}
+        # Backtracking state
+        self.assignment_history: List[Tuple[Tuple[int, str], str, str]] = []  # (night, role, person)
+        self.tried_candidates: Dict[Tuple[Tuple[int, str], str], Set[str]] = {}  # (night, role) -> set of tried people
         
-        # Debug mode
-        self.verbose = True
+        # Stats
+        self.backtrack_count = 0
+        self.assignment_count = 0
+        
+        # Debug
+        self.verbose = False
+
+    def reset_caps(self):
+        """Reset capacities to initial values"""
+        self.caps = {
+            name: {
+                "H": self.initial_caps[name]["H"],
+                "S": self.initial_caps[name]["S"],
+                "C": self.initial_caps[name]["C"],
+                "can_head": self.initial_caps[name]["can_head"],
+            }
+            for name in self.persons
+        }
 
     def log(self, msg: str, level=1):
-        """Print with indentation based on level"""
         if self.verbose:
             print("  " * level + msg)
 
-    def get_eligible_people(self, week_day: Tuple[int, str]) -> List[str]:
-        """Get people eligible for this night based on gender constraints"""
-        rule = GENDER_ONLY.get(week_day)
-        if not rule:
-            return self.persons.copy()
-        return [p for p in self.persons if self.name_to_gender[p] == rule]
-
     def get_cap_key(self, role: str) -> str:
-        """Map role to capacity key"""
         if role == "H":
             return "H"
         elif role.startswith("S"):
@@ -131,37 +142,17 @@ class RosterBuilder:
         """Get sorted list of candidates for this role"""
         cap_key = self.get_cap_key(role)
         
-        # Filter to available people
-        candidates = [p for p in self.persons if self.is_available(p, role, week_day)]
+        # Filter to available people who haven't been tried yet for this slot
+        slot_key = (week_day, role)
+        tried = self.tried_candidates.get(slot_key, set())
         
-        # Sort by:
-        # 1. Remaining capacity in this category (lowest first - people who MUST use it)
-        # 2. Whether they did same role type recently (penalize)
-        # 3. Random tiebreaker
-        def sort_key(person):
-            remaining = self.caps[person][cap_key]
-            
-            # Penalty for back-to-back same role type
-            penalty = 0
-            last_night = self.last_role_for_person[person]
-            if last_night is not None:
-                curr_idx = self.night_index[week_day]
-                last_idx = self.night_index[last_night]
-                if curr_idx == last_idx + 1:
-                    # Consecutive nights - check if same role type
-                    last_assigned_role = None
-                    for r, p in self.roster[last_night].items():
-                        if p == person:
-                            last_assigned_role = r
-                            break
-                    if last_assigned_role:
-                        last_cap_key = self.get_cap_key(last_assigned_role)
-                        if last_cap_key == cap_key:
-                            penalty = 10  # Push down but don't exclude
-            
-            return (remaining + penalty, random.random())
+        candidates = [
+            p for p in self.persons 
+            if self.is_available(p, role, week_day) and p not in tried
+        ]
         
-        candidates.sort(key=sort_key)
+        # Sort by remaining capacity (lowest first) + random tiebreaker
+        candidates.sort(key=lambda p: (self.caps[p][cap_key], random.random()))
         return candidates
 
     def assign_role(self, person: str, role: str, week_day: Tuple[int, str]):
@@ -173,113 +164,105 @@ class RosterBuilder:
         
         self.roster[week_day][role] = person
         self.caps[person][cap_key] -= 1
-        self.last_role_for_person[person] = week_day
+        self.assignment_history.append((week_day, role, person))
+        self.assignment_count += 1
+        
+        # Mark this person as tried for this slot
+        slot_key = (week_day, role)
+        if slot_key not in self.tried_candidates:
+            self.tried_candidates[slot_key] = set()
+        self.tried_candidates[slot_key].add(person)
         
         self.log(f"✓ Assigned {person} to {role} (remaining {cap_key}={self.caps[person][cap_key]})", level=3)
 
-    def assign_night(self, week_day: Tuple[int, str]) -> bool:
-        """Try to assign all roles for one night"""
-        week, day = week_day
-        gender_tag = ""
-        if week_day in GENDER_ONLY:
-            gender_tag = f" ({'Girls' if GENDER_ONLY[week_day]=='F' else 'Boys'}-only)"
-        
-        self.log(f"Assigning Week {week} {day}{gender_tag}", level=1)
-        
-        eligible = self.get_eligible_people(week_day)
-        self.log(f"Eligible people: {', '.join(eligible)}", level=2)
-        
-        if len(eligible) < 6:
-            self.log(f"✗ Only {len(eligible)} eligible people, need 6!", level=2)
+    def undo_assignment(self):
+        """Undo the most recent assignment"""
+        if not self.assignment_history:
             return False
         
-        # Try to assign each role
-        for role in ROLES_PER_NIGHT:
-            candidates = self.get_candidates(role, week_day)
-            
-            if not candidates:
-                self.log(f"✗ No candidates for {role}", level=2)
-                self.print_debug_state(week_day, role)
-                return False
-            
-            # Assign the best candidate
-            self.assign_role(candidates[0], role, week_day)
+        week_day, role, person = self.assignment_history.pop()
+        cap_key = self.get_cap_key(role)
         
-        # Verify 6 unique people
-        assigned = set(self.roster[week_day].values())
-        if len(assigned) != 6:
-            self.log(f"✗ ERROR: Only {len(assigned)} unique people assigned!", level=2)
-            return False
+        # Restore capacity
+        self.caps[person][cap_key] += 1
+        
+        # Remove from roster
+        del self.roster[week_day][role]
+        if not self.roster[week_day]:
+            del self.roster[week_day]
+        
+        self.backtrack_count += 1
+        self.log(f"⟲ Backtracked {person} from {role} on {week_day}", level=3)
         
         return True
 
-    def print_debug_state(self, failed_night: Tuple[int, str], failed_role: str):
-        """Print detailed debug info when assignment fails"""
-        print("\n" + "="*60)
-        print("FAILURE DEBUG INFO")
-        print("="*60)
-        print(f"Failed on: Week {failed_night[0]} {failed_night[1]}, Role: {failed_role}")
+    def solve_with_backtracking(self) -> bool:
+        """Recursively solve the roster with backtracking"""
+        # Base case: all nights assigned
+        if len(self.assignment_history) == len(NIGHTS) * len(ROLES_PER_NIGHT):
+            return True
         
-        print("\nAlready assigned this night:")
-        if failed_night in self.roster:
-            for r, p in self.roster[failed_night].items():
-                print(f"  {r}: {p}")
-        else:
-            print("  (none yet)")
+        # Determine current night and role
+        num_assigned = len(self.assignment_history)
+        night_idx = num_assigned // len(ROLES_PER_NIGHT)
+        role_idx = num_assigned % len(ROLES_PER_NIGHT)
         
-        print("\nRemaining capacities:")
-        cap_key = self.get_cap_key(failed_role)
-        for person in sorted(self.persons):
-            h, s, c = self.caps[person]["H"], self.caps[person]["S"], self.caps[person]["C"]
-            total = h + s + c
-            marker = ""
-            if person in self.roster.get(failed_night, {}).values():
-                marker = " [ALREADY ASSIGNED TONIGHT]"
-            elif self.caps[person][cap_key] > 0:
-                marker = f" [HAS {cap_key} CAPACITY]"
-            print(f"  {person}: H={h}, S={s}, C={c}, Total={total}{marker}")
+        # Determine assignment order: gender-restricted nights first
+        ordered_nights = []
+        for wd in NIGHTS:
+            if wd in GENDER_ONLY:
+                ordered_nights.insert(0, wd)  # Prioritize
+            else:
+                ordered_nights.append(wd)
         
-        print("\nGender constraint:")
-        if failed_night in GENDER_ONLY:
-            required = GENDER_ONLY[failed_night]
-            print(f"  Required: {required}")
-            eligible = [p for p in self.persons if self.name_to_gender[p] == required]
-            print(f"  Eligible: {', '.join(eligible)}")
-        else:
-            print("  No restriction")
+        # But actually, let's keep natural order for simplicity
+        # The key is backtracking will fix mistakes
+        ordered_nights = NIGHTS
         
-        print("="*60 + "\n")
+        week_day = ordered_nights[night_idx]
+        role = ROLES_PER_NIGHT[role_idx]
+        
+        # Get candidates for this slot
+        candidates = self.get_candidates(role, week_day)
+        
+        if not candidates:
+            # Dead end - need to backtrack
+            return False
+        
+        # Try each candidate
+        for person in candidates:
+            self.assign_role(person, role, week_day)
+            
+            # Recursively try to complete the rest
+            if self.solve_with_backtracking():
+                return True
+            
+            # Failed - undo and try next candidate
+            self.undo_assignment()
+        
+        # Exhausted all candidates for this slot - backtrack further
+        # Clear tried candidates for this slot so future attempts can retry
+        slot_key = (week_day, role)
+        self.tried_candidates.pop(slot_key, None)
+        
+        return False
 
     def build(self) -> Tuple[Optional[Dict], str]:
-        """Main build function with phased approach"""
+        """Main build function with backtracking"""
         print("\n" + "="*60)
-        print("STARTING ROSTER BUILD")
+        print("STARTING ROSTER BUILD (with backtracking)")
         print("="*60 + "\n")
         
-        # PHASE 1: Assign gender-restricted nights first (most constrained)
-        gender_nights = sorted([wd for wd in NIGHTS if wd in GENDER_ONLY])
+        success = self.solve_with_backtracking()
         
-        if gender_nights:
-            print("PHASE 1: Gender-restricted nights")
-            print("-" * 40)
-            for night in gender_nights:
-                if not self.assign_night(night):
-                    return None, f"Failed to assign gender-restricted night {night}"
-            print()
+        if not success:
+            return None, "No valid roster found (exhausted all possibilities)"
         
-        # PHASE 2: Assign remaining nights
-        remaining_nights = [wd for wd in NIGHTS if wd not in self.roster]
+        print(f"\n✓ Solution found!")
+        print(f"  Assignments: {self.assignment_count}")
+        print(f"  Backtracks: {self.backtrack_count}")
         
-        print("PHASE 2: Remaining nights")
-        print("-" * 40)
-        for night in remaining_nights:
-            if not self.assign_night(night):
-                return None, f"Failed to assign night {night}"
-        
-        # PHASE 3: Verify all capacities are used
-        print("\nPHASE 3: Verification")
-        print("-" * 40)
-        
+        # Verify all capacities used
         mismatches = []
         for person in self.persons:
             h, s, c = self.caps[person]["H"], self.caps[person]["S"], self.caps[person]["C"]
@@ -287,14 +270,12 @@ class RosterBuilder:
                 mismatches.append(f"{person}: H={h}, S={s}, C={c} remaining")
         
         if mismatches:
-            print("✗ Capacity mismatches:")
+            print("\n✗ Capacity mismatches:")
             for m in mismatches:
                 print(f"  {m}")
             return None, "Not all capacities were used"
         
         print("✓ All capacities used correctly")
-        print("\n" + "="*60)
-        print("BUILD SUCCESSFUL")
         print("="*60 + "\n")
         
         return self.roster, "ok"
@@ -345,7 +326,6 @@ def print_summary(summary: Dict[str, Counter], people: List[Dict]):
     print("PER-PERSON SUMMARY")
     print("="*60 + "\n")
     
-    # Create desired dict for comparison
     desired = {p["name"]: {"H": p["H"], "S": p["S"], "C": p["C"]} for p in people}
     
     print(f"{'Name':<6} {'Head':<6} {'Sous':<6} {'Clean':<6} {'Total':<6} {'Match'}")
@@ -357,7 +337,6 @@ def print_summary(summary: Dict[str, Counter], people: List[Dict]):
         h, s, c = cnt["H"], cnt["S"], cnt["C"]
         total = h + s + c
         
-        # Check if matches desired
         match = "✓"
         if (h != desired[person]["H"] or 
             s != desired[person]["S"] or 
@@ -374,9 +353,10 @@ def print_summary(summary: Dict[str, Counter], people: List[Dict]):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build meal roster from desired counts.")
+    parser = argparse.ArgumentParser(description="Build meal roster with backtracking.")
     parser.add_argument("--csv", required=True, help="Path to CSV")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for tiebreaking")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for candidate ordering")
+    parser.add_argument("--verbose", action="store_true", help="Enable detailed logging")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -388,6 +368,7 @@ def main():
         return
 
     builder = RosterBuilder(people)
+    builder.verbose = args.verbose
     roster, status = builder.build()
     
     if roster is None:
