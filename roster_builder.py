@@ -573,6 +573,18 @@ def print_distribution_analysis(roster: Dict):
 
 def export_to_csv(roster: Dict[Tuple[int, str], Dict[str, str]], output_path: str):
     """Export roster to CSV in weekly table format"""
+    # All days of the week
+    all_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    day_abbrev = {
+        "Monday": "Mon",
+        "Tuesday": "Tue",
+        "Wednesday": "Wed",
+        "Thursday": "Thu",
+        "Friday": "Fri",
+        "Saturday": "Sat",
+        "Sunday": "Sun"
+    }
+    
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         
@@ -581,7 +593,7 @@ def export_to_csv(roster: Dict[Tuple[int, str], Dict[str, str]], output_path: st
             writer.writerow([f"Week {week}"])
             
             # Column headers
-            writer.writerow(["Role", "Monday", "Tuesday", "Thursday", "Sunday"])
+            writer.writerow(["Role"] + all_days)
             
             # Role rows
             roles_display = {
@@ -593,13 +605,18 @@ def export_to_csv(roster: Dict[Tuple[int, str], Dict[str, str]], output_path: st
                 "C3": "Clean up 3"
             }
             
-            for role_key, role_name in roles_display.items():
+            for i, (role_key, role_name) in enumerate(roles_display.items()):
                 row = [role_name]
-                for day in COOKING_DAYS:
-                    night = (week, day)
+                for day in all_days:
+                    day_abbr = day_abbrev[day]
+                    night = (week, day_abbr)
                     person = roster.get(night, {}).get(role_key, "")
                     row.append(person)
                 writer.writerow(row)
+                
+                # Add blank row after Sous Chef 2 (index 2)
+                if i == 2:
+                    writer.writerow([])
             
             # Empty row between weeks
             writer.writerow([])
@@ -616,7 +633,7 @@ def main():
     parser.add_argument("--temp", type=float, default=10.0, help="Initial temperature")
     parser.add_argument("--cooling", type=float, default=0.95, help="Cooling rate")
     parser.add_argument("--verbose", action="store_true", help="Detailed logging")
-    parser.add_argument("--export", type=str, help="Export roster to CSV file")  # NEW
+    parser.add_argument("--export", type=str, help="Export roster to CSV file")
     args = parser.parse_args()
 
     random.seed(args.seed)
