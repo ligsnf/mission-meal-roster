@@ -144,7 +144,17 @@ def build_roster(people: List[Dict]) -> Tuple[Optional[Dict], str]:
         for role in ROLES_PER_NIGHT:
             cap_key = "H" if role == "H" else "S" if role.startswith("S") else "C"
             cands = candidates_for_role(wd, role)
+            print(f"  Role {role} ({cap_key}): {len(cands)} candidates")
+            print(f"    Already assigned tonight: {list(roster[wd].values())}")
+            print(f"    Available: {[c for c in cands if c not in roster[wd].values()][:5]}")  # Show first 5
             if not cands:
+                print(f"\n!!! FAILURE STATE !!!")
+                print(f"Night: {wd}, Role: {role}")
+                print(f"Already assigned: {roster[wd]}")
+                print(f"Remaining capacities:")
+                for p in persons:
+                    if caps[p]["H"] + caps[p]["S"] + caps[p]["C"] > 0:
+                        print(f"  {p}: H={caps[p]['H']}, S={caps[p]['S']}, C={caps[p]['C']}")
                 return None, f"Cannot assign role {role} on {wd}; no candidates with remaining {cap_key} capacity and constraints."
             # Choose candidate prioritizing:
             # - Not same person already assigned this night
